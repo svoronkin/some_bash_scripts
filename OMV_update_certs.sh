@@ -1,4 +1,6 @@
 #!/bin/bash
+
+# Tool for update TLS certs at OpenMediaVault
 # Usage: sudo ./OMV_update_cert.sh <UUID> cert.pem privkey.pem
 
 
