@@ -124,6 +124,8 @@ function urldecode() { : "${*//+/ }"; echo -e "${_//%/\\x}"; }
 
 `netbox_inventory.sh` — инвентаризация Linux-хоста в [NetBox](https://netbox.dev): собирает данные о железе, ОС и сети и создаёт или обновляет устройство в NetBox через REST API. Скрипт можно запускать повторно: если ничего не изменилось, он ничего не меняет в NetBox.
 
+Для Windows есть аналог на PowerShell — `netbox_inventory.ps1`, см. [раздел ниже](#windows-netbox_inventoryps1).
+
 ## Что собирается
 
 * **Устройство**: тип по модели материнской платы или системы, серийный номер, платформа (Proxmox, TrueNAS, Debian, Ubuntu, AlmaLinux и т. д.)
@@ -240,3 +242,62 @@ echo '30 3 * * * root /root/netbox_inventory.sh --token-file /root/.netbox-token
 * Если платформа в NetBox ограничена производителем (поле *Manufacturer* у платформы), а устройство другого производителя, платформа не назначается, и выводится предупреждение.
 
 Виртуальные машины скрипт добавляет как устройства и выводит предупреждение: в NetBox их правильнее вести в разделе *Virtualization*.
+
+## Windows: `netbox_inventory.ps1`
+
+Для Windows-хостов есть аналог на PowerShell с той же логикой работы с NetBox и тем же форматом `-CollectOnly`. Запускать bash-версию в WSL бессмысленно: WSL2 — это виртуальная машина, и скрипт увидит её виртуальные диски и выделенную ей память, а не железо компьютера.
+
+Данные собираются через CIM/WMI и сетевые командлеты: плата и серийник (`Win32_BaseBoard`, `Win32_BIOS`), CPU (`Win32_Processor`), модули RAM с партномерами и серийниками (`Win32_PhysicalMemory`), диски с серийниками и типом шины (`Get-PhysicalDisk`), сетевые адаптеры, MAC и IP (`Get-NetAdapter`, `Get-NetIPAddress`). Платформа — `Windows` или `Windows Server`.
+
+### Требования
+
+* Windows 10/11 или Windows Server 2016+, Windows PowerShell 5.1 или PowerShell 7+
+* никаких дополнительных модулей и программ
+* желательно запускать от администратора: без этого часть серийных номеров может быть недоступна
+
+### Подготовка токена
+
+```powershell
+New-Item -ItemType Directory -Force C:\ProgramData\netbox | Out-Null
+Set-Content -Path C:\ProgramData\netbox\token -Value 'nbt_xxxxxxxx.yyyyyyyy' -NoNewline
+# оставить доступ к файлу только администраторам и SYSTEM
+icacls C:\ProgramData\netbox\token /inheritance:r /grant:r "Administrators:R" "SYSTEM:R"
+```
+
+### Использование
+
+Файл скачанный из интернета Windows может заблокировать — снимите блокировку один раз (`Unblock-File`) или запускайте с `-ExecutionPolicy Bypass`:
+
+```powershell
+Unblock-File .\netbox_inventory.ps1
+
+# 1. Посмотреть, что собрано о хосте (NetBox не нужен)
+.\netbox_inventory.ps1 -CollectOnly
+
+# 2. Пробный прогон
+.\netbox_inventory.ps1 -TokenFile C:\ProgramData\netbox\token -DryRun
+
+# 3. Применить (для нового устройства нужен -Site)
+.\netbox_inventory.ps1 -TokenFile C:\ProgramData\netbox\token -Site LED -Tenant LAB -Role Workstation
+```
+
+Регулярный запуск через планировщик задач (ежедневно от SYSTEM):
+
+```powershell
+$action  = New-ScheduledTaskAction -Execute 'powershell.exe' `
+    -Argument '-NoProfile -ExecutionPolicy Bypass -File C:\ProgramData\netbox\netbox_inventory.ps1 -TokenFile C:\ProgramData\netbox\token'
+$trigger = New-ScheduledTaskTrigger -Daily -At 03:30
+Register-ScheduledTask -TaskName 'NetBox inventory' -Action $action -Trigger $trigger -User 'SYSTEM' -RunLevel Highest
+```
+
+### Параметры
+
+Названия совпадают с bash-версией, но в стиле PowerShell: `-Url`, `-TokenFile`, `-Insecure`, `-Name`, `-Site`, `-Role`, `-Tenant`, `-Platform`, `-Rack`, `-Location`, `-Tag`, `-SkipInterfaceRegex`, `-MinDiskGB`, `-DryRun`, `-CollectOnly`, `-NoIPv6`. Работают и те же переменные окружения (`NETBOX_URL`, `NETBOX_TOKEN`, `SITE_NAME` и т. д.). Справка: `Get-Help .\netbox_inventory.ps1 -Full`.
+
+### Особенности Windows-версии
+
+* **Модель устройства** берётся из `Win32_ComputerSystem`, а если там заглушка (`System Product Name` на самосборных ПК) — из модели материнской платы.
+* **Сетевые адаптеры**: учитываются физические Ethernet и Wi-Fi (тип по скорости линка и поколению Wi-Fi: 802.11ac/ax/be), а также VPN-адаптеры с IP-адресами. Пропускаются Bluetooth, Wi-Fi Direct и виртуальные «двойники» Wi-Fi 7 (HBS/MLO), внутренние сети Hyper-V и WSL (`vEthernet (WSL)`, `vEthernet (Default Switch)`), адаптеры VirtualBox/VMware Host-Only, туннели Teredo/ISATAP/6to4 и виртуальные адаптеры без адресов. Временные IPv6-адреса (privacy extensions) не добавляются.
+* **Имена интерфейсов** — как в Windows (`Ethernet`, `Wi-Fi`), в описание интерфейса пишется модель адаптера.
+* **Связи мост/LAG** (NIC Teaming) не моделируются.
+* **Служебный вывод** идёт в stderr, поэтому `-CollectOnly` можно перенаправить в файл: `.\netbox_inventory.ps1 -CollectOnly > facts.json`.
