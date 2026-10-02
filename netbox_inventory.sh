@@ -7,13 +7,15 @@
 set -euo pipefail
 export LC_ALL=C
 
-SCRIPT_VERSION=2.0.0
+SCRIPT_VERSION=2.1.0
 
 # ---------- настройки (env или параметры) ----------
 NETBOX_URL=${NETBOX_URL:-https://netbox.p4el.net}
 NETBOX_TOKEN=${NETBOX_TOKEN:-}
 NETBOX_TOKEN_FILE=${NETBOX_TOKEN_FILE:-}
 NETBOX_CACERT=${NETBOX_CACERT:-}
+# host:port:address — как curl --resolve, если NetBox недоступен по адресу из DNS
+NETBOX_RESOLVE=${NETBOX_RESOLVE:-}
 NETBOX_TAG=${NETBOX_TAG:-auto-inventory}
 DEVICE_NAME=${DEVICE_NAME:-}
 DEVICE_ROLE=${DEVICE_ROLE:-server}
@@ -51,6 +53,8 @@ netbox_inventory.sh $SCRIPT_VERSION — добавляет/обновляет т
   -u, --url URL            URL NetBox (по умолчанию: $NETBOX_URL)
       --token-file FILE    файл с API-токеном (права 600). Либо env NETBOX_TOKEN.
       --cacert FILE        CA-сертификат для проверки TLS
+      --resolve H:P:ADDR   подключаться к ADDR вместо адреса из DNS (как curl --resolve),
+                           например netbox.example.com:443:192.168.32.7
       --insecure           не проверять TLS-сертификат (не рекомендуется)
 
 Устройство:
@@ -85,6 +89,7 @@ parse_args() {
             --token-file)    NETBOX_TOKEN_FILE=$2; shift 2 ;;
             -t|--token)      die "--token небезопасен (виден в ps и истории). Используйте --token-file или env NETBOX_TOKEN" ;;
             --cacert)        NETBOX_CACERT=$2; shift 2 ;;
+            --resolve)       NETBOX_RESOLVE=$2; shift 2 ;;
             --insecure)      INSECURE=1; shift ;;
             -n|--name)       DEVICE_NAME=$2; shift 2 ;;
             -s|--site)       SITE_NAME=$2; shift 2 ;;
@@ -395,7 +400,7 @@ collect_network() {
         local phys=false wifi=false speed=0
         if [[ -e /sys/class/net/$ifname/device ]]; then phys=true; fi
         if [[ -d /sys/class/net/$ifname/wireless || -d /sys/class/net/$ifname/phy80211 ]]; then wifi=true; fi
-        if [[ $phys == true && -r /sys/class/net/$ifname/speed ]]; then
+        if [[ -r /sys/class/net/$ifname/speed ]]; then
             speed=$(cat "/sys/class/net/$ifname/speed" 2>/dev/null || echo 0)
             [[ $speed =~ ^[0-9]+$ ]] || speed=0
         fi
@@ -416,7 +421,10 @@ collect_network() {
                      mac: (if ($l.link_type == "ether") then ($l.address // "") else "" end),
                      mtu: $l.mtu,
                      up: any(($l.flags // [])[]; . == "UP"),
-                     physical: $phys, wireless: $wifi, speed: $speed,
+                     # ether-интерфейс без linkinfo.kind — физический порт (в т.ч. порты встроенного
+                     # коммутатора DSA, у которых нет /sys/class/net/X/device)
+                     physical: ($phys or ((($l.linkinfo.info_kind // "") == "") and $l.link_type == "ether" and ($wifi | not))),
+                     wireless: $wifi, speed: $speed,
                      addresses: $ips }]' <<<"$result")
     done < <(jq -r '.[].ifname' <<<"$links")
     jq -c --arg def "$defdev" '{default_iface:$def, interfaces:.}' <<<"$result"
@@ -425,9 +433,12 @@ collect_network() {
 # Какие интерфейсы не нужны в NetBox
 skip_iface() {
     local name=$1 kind=$2
-    case $kind in loopback|veth|tun|tap|dummy|ipip|sit|ip6tnl|gre|gretap|ip6gre|nlmon|ifb|vxlan|geneve) return 0 ;; esac
+    # tun не исключаем по типу: на нём работают VPN (OpenVPN tun0, AmneziaWG awg0); tap-интерфейсы ВМ
+    # Proxmox отсекаются по имени ниже
+    case $kind in loopback|veth|dummy|ipip|sit|ip6tnl|gre|gretap|ip6gre|ip6gretap|erspan|ip6erspan|vti|vti6|nlmon|ifb|vxlan|geneve) return 0 ;; esac
     case $name in
         lo|docker[0-9]*|virbr*|veth*|tap*|fwbr*|fwpr*|fwln*|cni*|flannel*|cali*|tunl*|kube-*|cilium*|lxc*|vnet*|weave*|podman*) return 0 ;;
+        ip_vti*|ip6_vti*|ip6tnl*|sit[0-9]*|gre[0-9]*|gretap*|erspan*|miireg|imq*|teql*|bonding_masters|ifb*) return 0 ;;
     esac
     [[ $name =~ ^br-[0-9a-f]{12}$ ]] && return 0          # docker compose сети
     if [[ -n $SKIP_IF_REGEX && $name =~ $SKIP_IF_REGEX ]]; then return 0; fi
@@ -474,6 +485,7 @@ setup_api() {
     CURL_OPTS=(--silent --show-error --connect-timeout 10 --max-time 60 --retry 2 --retry-delay 2
                -H "@$AUTH_HEADER_FILE" -H 'Accept: application/json' -H 'Content-Type: application/json')
     if [[ -n $NETBOX_CACERT ]]; then CURL_OPTS+=(--cacert "$NETBOX_CACERT"); fi
+    if [[ -n $NETBOX_RESOLVE ]]; then CURL_OPTS+=(--resolve "$NETBOX_RESOLVE"); fi
     if [[ $INSECURE == 1 ]]; then warn "проверка TLS отключена (--insecure)"; CURL_OPTS+=(-k); fi
 }
 
@@ -604,8 +616,33 @@ platform_for_type() {
     echo "$pid"
 }
 
+# Hostname может не совпадать с именем в NetBox (GW-CGMax vs CGMax). Ищем устройство по серийнику,
+# затем по IP-адресам хоста; берём результат, только если он однозначен.
+find_device_fallback() {
+    local facts=$1 serial=$2 found ids addr
+    if [[ -n $serial ]]; then
+        found=$(nb GET "dcim/devices/?serial=$(uri "$serial")&limit=2") || return 1
+        if [[ $(jq -r .count <<<"$found") == 1 ]]; then
+            jq -c '.results[0]' <<<"$found"
+            log "  найдено по серийному номеру $serial"
+            return 0
+        fi
+    fi
+    ids=""
+    while IFS= read -r addr; do
+        found=$(nb_find "ipam/ip-addresses/" "address=$(uri "$addr")&vrf_id=null") || return 1
+        ids+=$(jq -r '.assigned_object.device.id // empty' <<<"$found")$'\n'
+    done < <(jq -r '.interfaces[].addresses[] | select(contains(":") | not)' <<<"$facts")
+    ids=$(grep -v '^$' <<<"$ids" | sort -u || true)
+    if [[ -n $ids && $(wc -l <<<"$ids") -eq 1 ]]; then
+        nb GET "dcim/devices/$ids/" || return 1
+        log "  найдено по IP-адресам хоста"
+    fi
+}
+
 ensure_device() {
-    local facts=$1 name platform_id serial patch site_id tenant_id role_id type_id body
+    local facts=$1 name platform_id serial patch site_id tenant_id role_id type_id body explicit=0
+    [[ -n $DEVICE_NAME ]] && explicit=1
     name=${DEVICE_NAME:-$(jq -r .hostname <<<"$facts")}
     DEVICE_NAME=$name
     serial=$(jq -r '.system.serial // empty' <<<"$facts")
@@ -618,6 +655,14 @@ ensure_device() {
     fi
 
     DEVICE_JSON=$(nb_find "dcim/devices/" "name=$(uri "$name")") || return 1
+    if [[ -z $DEVICE_JSON && $explicit == 0 ]]; then
+        DEVICE_JSON=$(find_device_fallback "$facts" "$serial") || return 1
+        if [[ -n $DEVICE_JSON ]]; then
+            DEVICE_NAME=$(jq -r .name <<<"$DEVICE_JSON")
+            warn "hostname '$name' не совпадает с именем в NetBox '$DEVICE_NAME' — использую его (имя в NetBox не меняю; чтобы не искать, укажите --name)"
+            name=$DEVICE_NAME
+        fi
+    fi
     if [[ -n $DEVICE_JSON ]]; then
         DEVICE_ID=$(jq -r .id <<<"$DEVICE_JSON")
         ok "устройство '$name' найдено (id $DEVICE_ID)"
@@ -853,7 +898,13 @@ sync_interfaces() {
         cur=$(jq -c --arg n "$name" 'map(select(.name == $n)) | .[0] // empty' <<<"$existing")
         if [[ -n $cur ]]; then
             id=$(jq -r .id <<<"$cur")
-            # Тип меняем, только если в NetBox он 'other' (ручные правки не трогаем)
+            # Тип меняем, только если в NetBox он 'other' (ручные правки не трогаем).
+            # К виртуальным типам (bridge/lag/virtual) NetBox не допускает кабель — такие не трогаем.
+            if [[ $(jq -r '.type.value' <<<"$cur") == other && $(jq -r '.cable // empty' <<<"$cur") != "" ]] && \
+               [[ $type == bridge || $type == lag || $type == virtual ]]; then
+                warn "интерфейс $name: в NetBox к нему подключён кабель, тип '$type' не ставлю — перенесите кабель на физический порт"
+                type=other
+            fi
             patch=$(jq -cn --argjson c "$cur" --arg type "$type" --arg mtu "$mtu" '
                 {} + (if $c.type.value == "other" and $type != "other" then {type:$type} else {} end)
                    + (if $mtu != "" and (($c.mtu // 0)|tostring) != $mtu then {mtu:($mtu|tonumber)} else {} end)')
@@ -872,25 +923,28 @@ sync_interfaces() {
         if [[ -n $mac ]]; then sync_mac "$id" "$mac" "$cur" "$new_mac_api"; fi
     done < <(jq -c '.interfaces[]' <<<"$facts")
 
-    # Проход 2: связи bridge / lag / parent (VLAN)
+    # Проход 2: связи bridge / lag (через master) и parent (VLAN через link) — независимо:
+    # VLAN-интерфейс может одновременно иметь родителя и состоять в мосту (switch0.10 -> br10)
     while IFS= read -r i; do
-        local name master slave_kind link kind field="" target="" cur patch id
+        local name master slave_kind link kind cur id rel field target_name target
         name=$(jq -r .name <<<"$i"); [[ -n ${IFACE_ID[$name]:-} ]] || continue
         master=$(jq -r .master <<<"$i"); slave_kind=$(jq -r .slave_kind <<<"$i")
         link=$(jq -r .link <<<"$i"); kind=$(jq -r .kind <<<"$i")
-        if [[ -n $master && -n ${IFACE_ID[$master]:-} ]]; then
-            case $slave_kind in bridge) field=bridge ;; bond|team) field=lag ;; esac
-            target=${IFACE_ID[$master]}
-        elif [[ $kind == vlan && -n $link && -n ${IFACE_ID[$link]:-} ]]; then
-            field=parent; target=${IFACE_ID[$link]}
-        fi
-        [[ -n $field && $target =~ ^[1-9] ]] || continue
         id=${IFACE_ID[$name]}
         cur=$(jq -c --arg n "$name" 'map(select(.name == $n)) | .[0] // {}' <<<"$existing")
-        if [[ $(jq -r --arg f "$field" '.[$f].id // 0' <<<"$cur") != "$target" ]]; then
-            change "интерфейс $name: $field -> $master$link"
-            nb PATCH "dcim/interfaces/$id/" "{\"$field\":$target}" >/dev/null || return 1
+        local rels=()
+        if [[ -n $master ]]; then
+            case $slave_kind in bridge) rels+=("bridge:$master") ;; bond|team) rels+=("lag:$master") ;; esac
         fi
+        if [[ $kind == vlan && -n $link ]]; then rels+=("parent:$link"); fi
+        for rel in ${rels[@]+"${rels[@]}"}; do
+            field=${rel%%:*}; target_name=${rel#*:}; target=${IFACE_ID[$target_name]:-}
+            [[ $target =~ ^[1-9] && $id =~ ^[1-9] ]] || continue
+            if [[ $(jq -r --arg f "$field" '.[$f].id // 0' <<<"$cur") != "$target" ]]; then
+                change "интерфейс $name: $field -> $target_name"
+                nb PATCH "dcim/interfaces/$id/" "{\"$field\":$target}" >/dev/null || return 1
+            fi
+        done
     done < <(jq -c '.interfaces[]' <<<"$facts")
 }
 

@@ -130,7 +130,7 @@ function urldecode() { : "${*//+/ }"; echo -e "${_//%/\\x}"; }
 * **CPU**: модель, сокеты, ядра, частота, архитектура → модуль `CPU`
 * **RAM**: каждый модуль с производителем, партномером, серийником, типом (DDR3/4/5), частотой, ECC → модули `RAM-N`
 * **Диски**: модель, серийник, размер, тип (HD/SSD/NVME) → модули `Disk-N`. Диски за USB-SATA мостом распознаются через `smartctl`
-* **Сеть**: физические порты (тип по скорости), Wi-Fi, мосты, bond, VLAN, связи порт → мост/bond, MAC-адреса, IPv4/IPv6, DNS-имя и primary IP
+* **Сеть**: физические порты (тип по скорости, включая порты встроенных коммутаторов DSA), Wi-Fi, мосты, bond, VLAN, VPN-туннели (WireGuard, AmneziaWG, OpenVPN), связи порт → мост/bond и VLAN → родитель, MAC-адреса, IPv4/IPv6, DNS-имя и primary IP
 
 Типы модулей создаются с [профилями](https://netboxlabs.com/docs/netbox/models/dcim/moduletypeprofile/) `CPU`, `Memory` и `Hard disk` (NetBox 4.3+). Всё, что создаёт скрипт, помечается тегом `auto-inventory`.
 
@@ -189,6 +189,12 @@ nano /root/.netbox-token        # вставить токен
   ssh root@lab02 "bash -c 'read -r NETBOX_TOKEN; export NETBOX_TOKEN; exec bash -s -- --dry-run'"
 ```
 
+Если NetBox недоступен с хоста по адресу из DNS (например, NetBox работает в Docker на этом же хосте в сети ipvlan/macvlan, а хост не видит свои ipvlan-контейнеры), укажите адрес явно. TLS при этом проверяется по имени из URL:
+
+```bash
+./netbox_inventory.sh --token-file /root/.netbox-token --resolve netbox.example.com:443:192.168.32.7
+```
+
 Регулярный запуск по cron (раз в сутки):
 
 ```bash
@@ -203,8 +209,9 @@ echo '30 3 * * * root /root/netbox_inventory.sh --token-file /root/.netbox-token
 | `-u`, `--url URL` | `NETBOX_URL` | URL NetBox (по умолчанию `https://netbox.p4el.net`) |
 | `--token-file FILE` | `NETBOX_TOKEN_FILE` / `NETBOX_TOKEN` | файл с токеном или сам токен в переменной |
 | `--cacert FILE` | `NETBOX_CACERT` | CA-сертификат для проверки TLS |
+| `--resolve H:P:ADDR` | `NETBOX_RESOLVE` | подключаться к `ADDR` вместо адреса из DNS (как `curl --resolve`) |
 | `--insecure` | | не проверять TLS-сертификат (не рекомендуется) |
-| `-n`, `--name NAME` | `DEVICE_NAME` | имя устройства (по умолчанию `hostname -s`) |
+| `-n`, `--name NAME` | `DEVICE_NAME` | имя устройства (по умолчанию `hostname -s`, см. ниже про поиск) |
 | `-s`, `--site SITE` | `SITE_NAME` | сайт (обязателен только при создании) |
 | `-r`, `--role ROLE` | `DEVICE_ROLE` | роль (по умолчанию `server`) |
 | `--tenant TENANT` | `TENANT_NAME` | арендатор |
@@ -221,11 +228,14 @@ echo '30 3 * * * root /root/netbox_inventory.sh --token-file /root/.netbox-token
 
 ## Что скрипт делает и чего не делает
 
+* **Находит устройство, даже если hostname отличается от имени в NetBox** (например, `GW-CGMax` и `CGMax`): если по имени ничего не найдено и `--name` не задан, ищет по серийному номеру, затем по IP-адресам хоста. Результат берётся, только если он однозначен; имя в NetBox не меняется.
 * **Ищет, но никогда не создаёт** сайт, арендатора, стойку и локацию: опечатка в имени не создаст мусорный объект.
 * **Не перезаписывает ручные правки**: тип интерфейса меняется, только если в NetBox он `other`; `primary_ip4` ставится, только если пуст; у существующего устройства не меняются тип, стойка и позиция.
+* **Учитывает кабели**: если к интерфейсу (например, к мосту `br0`) в NetBox подключён кабель, тип `bridge`/`lag`/`virtual` ему не ставится (NetBox это запрещает) — выводится предупреждение, что кабель стоит перенести на физический порт.
 * **Не забирает чужие IP**: если адрес уже назначен другому устройству, скрипт выдаёт предупреждение и пропускает его.
-* **Пропускает служебные интерфейсы**: `lo`, `docker*`, `br-<id>`, `veth*`, `tap*`, `fwbr*`/`fwpr*`/`fwln*` (Proxmox), `virbr*`, CNI-интерфейсы Kubernetes, а также ZFS-тома `zd*` среди дисков.
-* **Нормализует производителей**: `Intel Corporation` → `Intel`, `Samsung Electronics Co Ltd` → `Samsung`. Производитель диска определяется по модели, производитель RAM при необходимости — по партномеру.
+* **Пропускает служебные интерфейсы**: `lo`, `docker*`, `br-<id>`, `veth*`, `tap*`, `fwbr*`/`fwpr*`/`fwln*` (Proxmox), `virbr*`, CNI-интерфейсы Kubernetes, туннели `ip_vti*`/`ip6tnl*`/`gre*`/`sit*`, `ifb*`, а также ZFS-тома `zd*` среди дисков.
+* **Шлюзы UniFi**: порты `eth0`–`eth3` на UniFi Cloud Gateway — это VLAN поверх встроенного коммутатора `switch0`, поэтому они заводятся как `virtual` с родителем `switch0`. Платформу удобно задать явно: `--platform "UniFi OS"`.
+* **Нормализует производителей**: `Intel Corporation` → `Intel`, `Samsung Electronics Co Ltd` → `Samsung`. Производитель диска определяется по модели, производитель RAM — по партномеру, если SMBIOS отдаёт JEDEC-код вместо имени (`1315` → Crucial).
 * **Ничего не удаляет**: интерфейсы и модули, которых больше нет на хосте, нужно убирать вручную.
 * Если платформа в NetBox ограничена производителем (поле *Manufacturer* у платформы), а устройство другого производителя, платформа не назначается, и выводится предупреждение.
 
