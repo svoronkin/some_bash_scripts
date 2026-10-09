@@ -123,3 +123,7 @@ function urldecode() { : "${*//+/ }"; echo -e "${_//%/\\x}"; }
 # NetBox inventory
 
 Скрипты инвентаризации хостов в NetBox (`netbox_inventory.sh` для Linux и `netbox_inventory.ps1` для Windows) переехали в отдельный репозиторий: **[svoronkin/netbox-inventory](https://github.com/svoronkin/netbox-inventory)**.
+
+# Windows reinstall
+
+PowerShell-скрипты бэкапа и восстановления рабочего ПК при переустановке Windows: программы через winget, настройки приложений, шрифты, реестр и WSL-дистрибутив целиком (`wsl --export --format vhd`). Подробности — в **[windows-reinstall/README.md](windows-reinstall/README.md)**.
