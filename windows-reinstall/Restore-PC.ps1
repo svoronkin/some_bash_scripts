@@ -58,6 +58,24 @@ if (-not $SkipApps) {
         # обновить PATH текущей сессии, чтобы увидеть git/code/cursor
         $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')
     }
+
+    # Программы, которых нет в winget: установщики лежат в <бэкап>\installers\
+    Step 'Установка программ не из winget'
+    $offline = @(
+        @{ Name  = 'DriverIdentifier'
+           File  = 'driveridentifier_setup.exe'
+           Args  = '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-'          # Inno Setup
+           Check = "${env:ProgramFiles(x86)}\Driver Identifier\DriverIdentifier.exe" }
+    )
+    foreach ($app in $offline) {
+        if (Test-Path $app.Check) { Write-Host "  $($app.Name) уже установлен"; continue }
+        $exe = Join-Path $From "installers\$($app.File)"
+        if (-not (Test-Path $exe)) { Write-Warning "$($app.Name): нет $exe — поставьте вручную"; continue }
+        Write-Host "-> $($app.Name)"
+        $p = Start-Process $exe -ArgumentList $app.Args -Wait -PassThru
+        if ($p.ExitCode -eq 0 -and (Test-Path $app.Check)) { Write-Host "  ok  $($app.Name)" }
+        else { Write-Warning "$($app.Name): установщик вернул код $($p.ExitCode)" }
+    }
 }
 
 # ---------------------------------------------------------------- WSL

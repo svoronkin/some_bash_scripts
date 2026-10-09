@@ -19,6 +19,7 @@
 | `%APPDATA%` | `Cursor\User`, `Code\User` (без `workspaceStorage`, `History`), `flameshot` |
 | `%LOCALAPPDATA%` | Windows Terminal `settings.json`, PowerToys, AmneziaVPN, пользовательские шрифты (Nerd Fonts) |
 | Реестр | AmneziaVPN, Flameshot, Soundpad, 7-Zip, `Explorer\Advanced`, `Keyboard Layout\Toggle` |
+| Установщики | программы, которых нет в winget (сейчас DriverIdentifier) — список `$installers` в `Backup-PC.ps1` |
 | Опционально | `-IncludeFirefox` (профиль), `-IncludeTelegram` (`tdata` без кэша), `-IncludeUserFolders` (Desktop, Documents, Downloads) |
 
 Структура бэкапа:
@@ -32,6 +33,7 @@ D:\PCBackup\
     ├── files\APPDATA\...       -> %APPDATA%
     ├── files\LOCALAPPDATA\...  -> %LOCALAPPDATA%
     ├── reg\*.reg
+    ├── installers\
     ├── lists\
     ├── wsl\AlmaLinux-10.vhdx, meta.json
     └── backup.log
@@ -81,7 +83,7 @@ powershell -ExecutionPolicy Bypass -File D:\PCBackup\Restore-PC.ps1
 
 По шагам:
 
-1. Ставит программы через `winget` (список — в начале `Restore-PC.ps1`, правьте под себя).
+1. Ставит программы через `winget` (список — в начале `Restore-PC.ps1`, правьте под себя), затем тихо ставит программы не из winget из `installers\` (таблица `$offline`: файл, ключи тихой установки, путь для проверки «уже установлено»). Новый установщик добавляется в двух местах: `$installers` в `Backup-PC.ps1` и `$offline` в `Restore-PC.ps1`.
 2. Включает WSL (`wsl --install --no-distribution`), копирует `.vhdx` в `-WslDir` и подключает его `wsl --import-in-place`. Если в `-WslDir` уже есть `ext4.vhdx` (диск пережил переустановку на `D:`), подключает его без копирования. Выставляет `DefaultUid`, иначе WSL входит под root.
 3. Копирует `files\*` обратно в профиль.
 4. Регистрирует шрифты в `HKCU\Software\Microsoft\Windows NT\CurrentVersion\Fonts`.

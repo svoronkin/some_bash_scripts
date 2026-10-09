@@ -113,6 +113,18 @@ if ($IncludeUserFolders) {
     Backup-Dir HOME 'Downloads'
 }
 
+# ---------------------------------------------------------------- установщики не из winget
+# Restore-PC.ps1 ставит их тихо (таблица $offline там же). Добавляя сюда файл, добавьте и строку туда.
+Step 'Установщики программ, которых нет в winget'
+New-Item -ItemType Directory -Force -Path "$Root\installers" | Out-Null
+$installers = @(
+    "$env:USERPROFILE\Downloads\driveridentifier_setup.exe"   # DriverIdentifier (driveridentifier.com)
+)
+foreach ($f in $installers) {
+    if (Test-Path $f) { Copy-Item $f "$Root\installers\" -Force; Write-Host "  ok  $f" }
+    else { Write-Warning "нет установщика: $f — скачайте его заново, иначе после переустановки придётся ставить руками" }
+}
+
 # ---------------------------------------------------------------- реестр
 Step 'Реестр'
 $regKeys = @{
