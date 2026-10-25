@@ -95,6 +95,10 @@ Backup-Dir LOCALAPPDATA 'Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalS
 Backup-Dir LOCALAPPDATA 'Microsoft\PowerToys' -ExcludeDirs 'Logs', 'Updates', 'Temp'
 Backup-Dir LOCALAPPDATA 'AmneziaVPN.ORG'
 Backup-Dir LOCALAPPDATA 'Microsoft\Windows\Fonts'   # Nerd Fonts для терминала / p10k
+# Grafana-дашборд на мини-экране 960x640 (USB-хаб): скрипт запуска + ярлык автозагрузки.
+# Профиль Edge не нужен — после восстановления один раз войти в Grafana в этом окне.
+Backup-Dir  LOCALAPPDATA 'NetMiniDisplay' -ExcludeDirs 'edge-profile'
+Backup-File APPDATA      'Microsoft\Windows\Start Menu\Programs\Startup\NetMiniDisplay.lnk'
 
 if ($IncludeFirefox) {
     Step 'Firefox'
