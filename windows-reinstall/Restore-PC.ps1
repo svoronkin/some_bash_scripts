@@ -1,17 +1,19 @@
 ﻿<#
-    Восстановление ПК после переустановки Windows из бэкапа Backup-PC.ps1.
+    Restore the PC after reinstalling Windows from a Backup-PC.ps1 backup.
 
-    Запуск (PowerShell ОТ АДМИНИСТРАТОРА, под своей учёткой):
+    Run (PowerShell AS ADMINISTRATOR, under your own account):
         powershell -ExecutionPolicy Bypass -File D:\PCBackup\Restore-PC.ps1
-    Скрипт идемпотентный: если попросит перезагрузку (WSL) — перезагрузитесь и запустите ещё раз.
+    The script is idempotent: if it asks for a reboot (WSL), reboot and run it again.
 
-    По умолчанию берётся самый свежий бэкап рядом со скриптом (D:\PCBackup или папка на NAS).
+    By default the newest backup next to the script is used (D:\PCBackup or the NAS folder).
+
+    Keep this file ASCII-only: Windows PowerShell 5.1 prints anything else as '?' in many consoles.
 #>
 #Requires -RunAsAdministrator
 param(
-    [string]$From,                               # конкретная папка бэкапа, напр. D:\PCBackup\2026-10-09_1800
-    [string]$Distro = 'AlmaLinux-10',
-    [string]$WslDir = 'D:\WSL\AlmaLinux-10',     # диск WSL теперь живёт на D: — переживёт следующую переустановку
+    [string]$From,                               # specific backup folder, e.g. D:\PCBackup\2026-10-09_1800
+    [string]$Distro,                             # WSL distro; empty: the one from the backup (context.json)
+    [string]$WslDir,                             # empty: D:\WSL\<distro> - lives on D: and survives the next reinstall
     [switch]$SkipApps,
     [switch]$SkipWsl,
     [switch]$SkipFiles
@@ -24,30 +26,42 @@ if (-not $From) {
     $From = Get-ChildItem $PSScriptRoot -Directory | Where-Object Name -match '^\d{4}-\d{2}-\d{2}_\d{4}$' |
             Sort-Object Name | Select-Object -Last 1 -ExpandProperty FullName
 }
-if (-not $From -or -not (Test-Path $From)) { throw "Не найден бэкап рядом со скриптом ($PSScriptRoot). Укажите -From." }
-Write-Host "Восстанавливаю из: $From" -ForegroundColor Green
+if (-not $From -or -not (Test-Path $From)) { throw "No backup found next to the script ($PSScriptRoot). Pass -From." }
+Write-Host "Restoring from: $From" -ForegroundColor Green
 Start-Transcript -Path "$env:TEMP\restore-pc-$(Get-Date -Format yyyyMMdd_HHmm).log" | Out-Null
 $needReboot = $false
 
-# ---------------------------------------------------------------- программы
-# Список собран из текущей системы. Драйверы, Office и прочее без winget — в чек-листе в конце.
+# context of the backed-up PC (user, profile, distro) vs the current one; older backups have only wsl\meta.json
+. (Join-Path $PSScriptRoot 'PCContext.ps1')
+$Old  = Read-PCContext (Join-Path $From 'context.json')
+$Meta = Read-PCContext (Join-Path $From 'wsl\meta.json')
+$Ctx  = Get-PCContext
+if (-not $Distro) { $Distro = if ($Old.Distro) { $Old.Distro } else { $Meta.Distro } }
+if (-not $WslDir -and $Distro) { $WslDir = "D:\WSL\$Distro" }
+$WslUser = if ($Old.WslUser) { $Old.WslUser } else { $Meta.DefaultUser }
+Write-Host "Backup of: $($Old.UserName) on $($Old.Computer), profile $($Old.UserProfile)"
+Write-Host "Restoring to: $($Ctx.UserName) on $($Ctx.Computer), profile $($Ctx.UserProfile)"
+$profileMoved = $Old.UserProfile -and ($Old.UserProfile -ne $Ctx.UserProfile)
+
+# ---------------------------------------------------------------- programs
+# The list was collected from the current system. Drivers, Office and others without winget are in the checklist at the end.
 $apps = @(
-    # система / утилиты
+    # system / utilities
     '7zip.7zip', 'Microsoft.PowerToys', 'Microsoft.WindowsTerminal', 'Flameshot.Flameshot',
     'bluemars.ClipX', 'namazso.PawnIO', 'Microsoft.VCRedist.2015+.x64', 'Microsoft.VCRedist.2015+.x86',
-    # сеть / безопасность
+    # network / security
     'Cloudflare.Warp', 'AmneziaVPN.AmneziaVPN', 'Bitwarden.Bitwarden',
-    # разработка
+    # development
     'Git.Git', 'GitHub.cli', 'Hashicorp.Terraform', 'Python.Python.3.14', 'Python.Launcher',
     'Microsoft.VisualStudioCode', 'Anysphere.Cursor', 'Anthropic.Claude',
-    # общение / браузер / игры / периферия
+    # chat / browser / games / peripherals
     'Telegram.TelegramDesktop', 'Discord.Discord', 'Mozilla.Firefox', 'Valve.Steam', 'Logitech.OptionsPlus'
 )
 
 if (-not $SkipApps) {
-    Step 'Установка программ через winget'
+    Step 'Installing programs with winget'
     if (-not (Get-Command winget -EA 0)) {
-        Write-Warning 'winget не найден. Обновите "App Installer" в Microsoft Store и запустите скрипт снова.'
+        Write-Warning 'winget not found. Update "App Installer" in the Microsoft Store and run the script again.'
     } else {
         winget source update | Out-Null
         foreach ($id in $apps) {
@@ -55,12 +69,12 @@ if (-not $SkipApps) {
             winget install --id $id -e --silent --accept-package-agreements --accept-source-agreements --disable-interactivity |
                 Select-Object -Last 1
         }
-        # обновить PATH текущей сессии, чтобы увидеть git/code/cursor
+        # refresh PATH of the current session to see git/code/cursor
         $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')
     }
 
-    # Программы, которых нет в winget: установщики лежат в <бэкап>\installers\
-    Step 'Установка программ не из winget'
+    # Programs not in winget: the installers are in <backup>\installers\
+    Step 'Installing programs not in winget'
     $offline = @(
         @{ Name  = 'DriverIdentifier'
            File  = 'driveridentifier_setup.exe'
@@ -68,13 +82,13 @@ if (-not $SkipApps) {
            Check = "${env:ProgramFiles(x86)}\Driver Identifier\DriverIdentifier.exe" }
     )
     foreach ($app in $offline) {
-        if (Test-Path $app.Check) { Write-Host "  $($app.Name) уже установлен"; continue }
+        if (Test-Path $app.Check) { Write-Host "  $($app.Name) is already installed"; continue }
         $exe = Join-Path $From "installers\$($app.File)"
-        if (-not (Test-Path $exe)) { Write-Warning "$($app.Name): нет $exe — поставьте вручную"; continue }
+        if (-not (Test-Path $exe)) { Write-Warning "$($app.Name): $exe is missing - install it by hand"; continue }
         Write-Host "-> $($app.Name)"
         $p = Start-Process $exe -ArgumentList $app.Args -Wait -PassThru
         if ($p.ExitCode -eq 0 -and (Test-Path $app.Check)) { Write-Host "  ok  $($app.Name)" }
-        else { Write-Warning "$($app.Name): установщик вернул код $($p.ExitCode)" }
+        else { Write-Warning "$($app.Name): installer returned exit code $($p.ExitCode)" }
     }
 }
 
@@ -84,71 +98,84 @@ function Test-DistroRegistered($name) {
         Where-Object { (Get-ItemProperty $_.PSPath).DistributionName -eq $name }
 }
 
+if (-not $Distro -and -not $SkipWsl) { Write-Warning 'The backup names no WSL distro - pass -Distro; skipping WSL'; $SkipWsl = $true }
 if (-not $SkipWsl) {
     Step "WSL: $Distro"
     wsl.exe --status *> $null
     if ($LASTEXITCODE -ne 0) {
-        Write-Host '  WSL не установлен — ставлю платформу...'
+        Write-Host '  WSL is not installed - installing the platform...'
         wsl.exe --install --no-distribution
         $needReboot = $true
     }
 
     if ($needReboot) {
-        Write-Warning 'Нужна перезагрузка для WSL. После неё запустите скрипт ещё раз (повторно уже установленное пропустится).'
+        Write-Warning 'WSL needs a reboot. After it, run the script again (already installed parts are skipped).'
     } elseif (Test-DistroRegistered $Distro) {
-        Write-Host "  $Distro уже зарегистрирован — пропускаю импорт."
+        Write-Host "  $Distro is already registered - skipping the import."
     } else {
         $target = Join-Path $WslDir 'ext4.vhdx'
         if (Test-Path $target) {
-            Write-Host "  найден существующий диск $target — подключаю его как есть"
+            Write-Host "  found existing disk $target - attaching it as is"
         } else {
             $src = Join-Path $From "wsl\$Distro.vhdx"
-            if (-not (Test-Path $src)) { Write-Warning "Нет $src"; $src = $null }
+            if (-not (Test-Path $src)) { Write-Warning "$src is missing"; $src = $null }
             if ($src) {
                 New-Item -ItemType Directory -Force -Path $WslDir | Out-Null
-                Write-Host "  копирую VHDX в $target ..."
+                Write-Host "  copying VHDX to $target ..."
                 Copy-Item $src $target
             }
         }
         if (Test-Path $target) {
             wsl.exe --import-in-place $Distro $target
             if (Test-DistroRegistered $Distro) {
-                # пользователь по умолчанию (после импорта WSL заходит под root)
-                $meta = Get-Content (Join-Path $From 'wsl\meta.json') -Raw -EA 0 | ConvertFrom-Json
-                $user = if ($meta.DefaultUser) { $meta.DefaultUser } else { 'svoronkin' }
-                $uid  = (wsl.exe -d $Distro -u root --cd ~ -- id -u $user).Trim()
+                # default user (after the import WSL logs in as root)
+                $uid = if ($WslUser) { (wsl.exe -d $Distro -u root --cd ~ -- id -u $WslUser | Out-String).Trim() }
                 if ($uid -match '^\d+$') {
                     $key = (Test-DistroRegistered $Distro).PSPath
                     Set-ItemProperty $key -Name DefaultUid -Value ([int]$uid) -Type DWord
-                    Write-Host "  пользователь по умолчанию: $user (uid $uid)"
+                    Write-Host "  default user: $WslUser (uid $uid)"
+                } else {
+                    Write-Warning "WSL user from the backup ('$WslUser') not found - WSL will log in as root"
                 }
                 wsl.exe --set-default $Distro
                 wsl.exe --terminate $Distro | Out-Null
-                Write-Host "  ok  $Distro импортирован" -ForegroundColor Green
+                Write-Host "  ok  $Distro imported" -ForegroundColor Green
             } else {
-                Write-Warning 'Импорт WSL не удался — см. лог.'
+                Write-Warning 'WSL import failed - see the log.'
             }
         }
     }
 }
 
-# ---------------------------------------------------------------- файлы
+# ---------------------------------------------------------------- files
 if (-not $SkipFiles) {
-    Step 'Восстановление файлов настроек'
-    # закрыть то, что держит свои настройки открытыми
+    Step 'Restoring settings files'
+    # close what keeps its settings open
     'PowerToys*', 'Telegram', 'firefox', 'Cursor', 'Code', 'flameshot', 'AmneziaVPN', 'WindowsTerminal', 'Claude' |
         ForEach-Object { Get-Process $_ -EA 0 } | Where-Object { $_.Id -ne $PID } | Stop-Process -Force -EA 0
 
-    $map = @{ HOME = $env:USERPROFILE; APPDATA = $env:APPDATA; LOCALAPPDATA = $env:LOCALAPPDATA }
+    $map = @{ HOME = $Ctx.UserProfile; APPDATA = $Ctx.AppData; LOCALAPPDATA = $Ctx.LocalAppData }
+    $restored = @()
     foreach ($token in $map.Keys) {
         $src = Join-Path $From "files\$token"
         if (Test-Path $src) {
             & robocopy $src $map[$token] /E /R:1 /W:1 /XJ /NFL /NDL /NJH /NJS /NP | Out-Null
-            if ($LASTEXITCODE -ge 8) { Write-Warning "robocopy $token код $LASTEXITCODE" } else { Write-Host "  ok  $token -> $($map[$token])" }
+            if ($LASTEXITCODE -ge 8) { Write-Warning "robocopy $token exit code $LASTEXITCODE" } else { Write-Host "  ok  $token -> $($map[$token])" }
+            # only what came from the backup, not the whole profile
+            $restored += Get-ChildItem $src -Force | ForEach-Object { Join-Path $map[$token] $_.Name }
         }
     }
+    if ($profileMoved) {
+        Step 'Moving user paths in restored configs to the new profile'
+        # top level only for HOME: Desktop/Documents/Downloads are user data, not configs
+        $restored = $restored | Where-Object { (Split-Path $_ -Leaf) -notin 'Desktop', 'Documents', 'Downloads' }
+        Update-UserPaths -Paths $restored -OldProfile $Old.UserProfile -NewProfile $Ctx.UserProfile
+    }
 
-    Step 'Регистрация шрифтов (Nerd Fonts)'
+    Step 'Shortcuts'
+    Get-ChildItem (Join-Path $From 'shortcuts') -Filter *.json -EA 0 | ForEach-Object { Import-Shortcut $_.FullName }
+
+    Step 'Registering fonts (Nerd Fonts)'
     $fontDir = "$env:LOCALAPPDATA\Microsoft\Windows\Fonts"
     $fontReg = 'HKCU:\Software\Microsoft\Windows NT\CurrentVersion\Fonts'
     if (-not (Test-Path $fontReg)) { New-Item $fontReg -Force | Out-Null }
@@ -158,13 +185,22 @@ if (-not $SkipFiles) {
         Write-Host "  $($_.Name)"
     }
 
-    Step 'Импорт реестра'
-    Get-ChildItem (Join-Path $From 'reg') -Filter *.reg -EA 0 | ForEach-Object {
+    Step 'Importing the registry'
+    $regDir = Join-Path $From 'reg'
+    if ($profileMoved -and (Test-Path $regDir)) {
+        # fix user paths in a temp copy, the backup itself stays untouched
+        $tmpReg = Join-Path $env:TEMP 'restore-pc-reg'
+        Remove-Item $tmpReg -Recurse -Force -EA 0
+        Copy-Item $regDir $tmpReg -Recurse
+        Update-UserPaths -Paths $tmpReg -OldProfile $Old.UserProfile -NewProfile $Ctx.UserProfile
+        $regDir = $tmpReg
+    }
+    Get-ChildItem $regDir -Filter *.reg -EA 0 | ForEach-Object {
         reg import $_.FullName 2>$null
         Write-Host "  $($_.Name)"
     }
 
-    Step 'Расширения редакторов'
+    Step 'Editor extensions'
     foreach ($ed in 'cursor', 'code') {
         $list = Join-Path $From "lists\$ed-extensions.txt"
         if ((Test-Path $list) -and (Get-Command $ed -EA 0)) {
@@ -175,20 +211,20 @@ if (-not $SkipFiles) {
 
 Stop-Transcript | Out-Null
 
-# ---------------------------------------------------------------- чек-лист
-Step 'Осталось сделать руками'
+# ---------------------------------------------------------------- checklist
+Step 'Left to do by hand'
 @'
- [ ] Драйверы: AMD Chipset Software (amd.com/support) и NVIDIA App + драйвер (nvidia.com/apps)
- [ ] Microsoft Office 2016 Pro Plus — со своего дистрибутива/ключа
- [ ] Принтер RICOH SP 150SU — драйвер с ricoh.com
- [ ] Steam: Настройки -> Хранилище -> добавить D:\SteamLibrary (Soundpad, Teardown и др. — оттуда же)
- [ ] Игры вне Steam в D:\Games (Tarkov — BSG Launcher, S.T.A.L.K.E.R. 2 и т.п.) — поставить лаунчеры и указать папку
- [ ] Войти: Bitwarden, Firefox Sync (если профиль не бэкапился), Telegram, Discord, Cloudflare WARP, Logi Options+ (настройки мыши — из облака Logi), GitHub CLI (gh auth login), Claude, Cursor
- [ ] AmneziaVPN: проверить, что серверы подтянулись из реестра; если нет — импортировать конфиг заново
- [ ] Windows Terminal: профиль "Alma" (по умолчанию) вернётся сам — его GUID зависит от имени дистрибутива
- [ ] Автозагрузка: ClipX, Flameshot и пр. — включить в самих программах, если не включились
- [ ] Мини-экран: перелогиниться, окно Grafana откроется само (NetMiniDisplay.lnk) — войти в Grafana в этом окне один раз
- [ ] Магазинную версию AlmaLinux из Microsoft Store НЕ ставить — будет конфликт имени с импортированной
+ [ ] Drivers: AMD Chipset Software (amd.com/support) and NVIDIA App + driver (nvidia.com/apps)
+ [ ] Microsoft Office 2016 Pro Plus - from your own installer/key
+ [ ] Printer RICOH SP 150SU - driver from ricoh.com
+ [ ] Steam: Settings -> Storage -> add D:\SteamLibrary (Soundpad, Teardown etc. are there too)
+ [ ] Games outside Steam in D:\Games (Tarkov - BSG Launcher, S.T.A.L.K.E.R. 2 etc.) - install the launchers and point them to the folder
+ [ ] Sign in: Bitwarden, Firefox Sync (if the profile was not backed up), Telegram, Discord, Cloudflare WARP, Logi Options+ (mouse settings come from the Logi cloud), GitHub CLI (gh auth login), Claude, Cursor
+ [ ] AmneziaVPN: check that the servers came back from the registry; if not, import the config again
+ [ ] Windows Terminal: the "Alma" profile (default) comes back by itself - its GUID depends on the distro name
+ [ ] Startup: ClipX, Flameshot etc. - enable it in the programs themselves if it did not come back
+ [ ] Mini display: sign out and in, the Grafana window opens by itself (NetMiniDisplay.lnk) - sign in to Grafana in that window once
+ [ ] Do NOT install AlmaLinux from the Microsoft Store - its name conflicts with the imported one
 '@ | Write-Host
 
-if ($needReboot) { Write-Host "`nПЕРЕЗАГРУЗИТЕСЬ и запустите скрипт ещё раз для импорта WSL." -ForegroundColor Yellow }
+if ($needReboot) { Write-Host "`nREBOOT and run the script again to import WSL." -ForegroundColor Yellow }
