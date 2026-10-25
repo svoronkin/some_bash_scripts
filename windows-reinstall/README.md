@@ -1,37 +1,45 @@
 # Windows reinstall: backup & restore
 
-Два PowerShell-скрипта, чтобы после чистой переустановки Windows 11 вернуть рабочий ПК к прежнему состоянию: программы, настройки, шрифты и WSL-дистрибутив целиком.
+Two PowerShell scripts that bring a working PC back to its previous state after a clean Windows 11 reinstall: programs, settings, fonts and the whole WSL distro.
 
-- `Backup-PC.ps1` — запускается **до** переустановки.
-- `Restore-PC.ps1` — запускается **после** переустановки, от администратора.
+- `Backup-PC.ps1` runs **before** the reinstall.
+- `Restore-PC.ps1` runs **after** the reinstall, as administrator.
+- `PCContext.ps1` is a helper both scripts load; keep it next to them.
 
-Предполагается, что диск `D:` при переустановке не трогается: на нём лежат локальная копия бэкапа, игры и репозитории.
+Nothing is tied to a user name. At the start `Get-PCContext` collects the user, profile folders (`%USERPROFILE%`, `%APPDATA%`, `%LOCALAPPDATA%`, Downloads, Startup), the default WSL distro and its user. The backup saves this to `context.json`. The restore compares it with the current PC: files go to the profile of whoever runs it, and if the profile folder changed (another user name), old paths in the restored text configs and `.reg` files are replaced with the new ones (`C:\Users\old`, `C:\\Users\\old`, `C:/Users/old`, `/mnt/c/Users/old`; each file keeps its encoding). Shortcuts are saved as JSON with `%USERPROFILE%`-style paths and recreated for the current user.
 
-> В бэкапе в открытом виде лежат приватные SSH-ключи (Windows и внутри WSL), конфиги AmneziaVPN, токены приложений. Храните его только там, куда нет доступа у посторонних.
+Drive `D:` is assumed to survive the reinstall: it holds the local copy of the backup, games and repositories.
 
-## Что сохраняется
+> The backup contains private SSH keys (Windows and inside WSL), AmneziaVPN configs and app tokens in plain form. Keep it only where nobody else has access.
 
-| Группа | Что |
+## What is saved
+
+| Group | What |
 |--|--|
-| WSL | дистрибутив целиком: `wsl --export <distro> <file>.vhdx --format vhd` (ключи, zsh/oh-my-zsh/p10k, brew, `~/.kube`, репозитории — всё внутри) |
-| Списки | `winget export`, программы из реестра, appx, автозагрузка, пользовательский `PATH`, расширения Cursor/VS Code, `brew leaves` и `dnf --userinstalled` из WSL |
-| `%USERPROFILE%` | `.ssh`, `.gitconfig`, `.wslconfig`, `.claude`, `.claude.json`, `.cursor` и `.vscode` (без `extensions`), `.vscode-shared`, `.copilot` |
-| `%APPDATA%` | `Cursor\User`, `Code\User` (без `workspaceStorage`, `History`), `flameshot`, ярлык автозагрузки `NetMiniDisplay.lnk` |
-| `%LOCALAPPDATA%` | Windows Terminal `settings.json`, PowerToys, AmneziaVPN, пользовательские шрифты (Nerd Fonts), `NetMiniDisplay` (скрипт окна Grafana на мини-экране, без `edge-profile`) |
-| Реестр | AmneziaVPN, Flameshot, Soundpad, 7-Zip, `Explorer\Advanced`, `Keyboard Layout\Toggle` |
-| Установщики | программы, которых нет в winget (сейчас DriverIdentifier) — список `$installers` в `Backup-PC.ps1` |
-| Опционально | `-IncludeFirefox` (профиль), `-IncludeTelegram` (`tdata` без кэша), `-IncludeUserFolders` (Desktop, Documents, Downloads) |
+| WSL | the whole distro: `wsl --export <distro> <file>.vhdx --format vhd` (keys, zsh/oh-my-zsh/p10k, brew, `~/.kube`, repositories - everything inside) |
+| Lists | `winget export`, programs from the registry, appx, startup items, user `PATH`, Cursor/VS Code extensions, `brew leaves` and `dnf --userinstalled` from WSL |
+| `%USERPROFILE%` | `.ssh`, `.gitconfig`, `.wslconfig`, `.claude`, `.claude.json`, `.cursor` and `.vscode` (without `extensions`), `.vscode-shared`, `.copilot`, `NetMiniDisplay` (launcher of the Grafana window on the mini display, without `edge-profile`) |
+| `%APPDATA%` | `Cursor\User`, `Code\User` (without `workspaceStorage`, `History`), `flameshot` |
+| Shortcuts | Startup shortcut `NetMiniDisplay.lnk` (as `shortcuts\*.json`) |
+| Context | `context.json`: user, computer, profile folders, WSL distro and user |
+| `%LOCALAPPDATA%` | Windows Terminal `settings.json`, PowerToys, AmneziaVPN, user fonts (Nerd Fonts) |
+| Registry | AmneziaVPN, Flameshot, Soundpad, 7-Zip, `Explorer\Advanced`, `Keyboard Layout\Toggle` |
+| Installers | programs not in winget (currently DriverIdentifier) - the `$installers` list in `Backup-PC.ps1` |
+| Optional | `-IncludeFirefox` (profile), `-IncludeTelegram` (`tdata` without cache), `-IncludeUserFolders` (Desktop, Documents, Downloads) |
 
-Структура бэкапа:
+Backup layout:
 
 ```
 D:\PCBackup\
 ├── Backup-PC.ps1
 ├── Restore-PC.ps1
+├── PCContext.ps1
 └── 2026-10-09_1840\
+    ├── context.json
     ├── files\HOME\...          -> %USERPROFILE%
     ├── files\APPDATA\...       -> %APPDATA%
     ├── files\LOCALAPPDATA\...  -> %LOCALAPPDATA%
+    ├── shortcuts\*.json
     ├── reg\*.reg
     ├── installers\
     ├── lists\
@@ -39,75 +47,78 @@ D:\PCBackup\
     └── backup.log
 ```
 
-## Бэкап
-
-Закройте Cursor/VS Code (Remote-WSL), Firefox и Telegram. Скрипт сделает `wsl --shutdown` — все WSL-сессии закроются.
+## Backup
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\Backup-PC.ps1 -IncludeFirefox -IncludeTelegram -IncludeUserFolders
 ```
 
-| Параметр | По умолчанию | Назначение |
+The script closes the apps whose settings it copies: Cursor, VS Code, PowerToys, Flameshot, plus Firefox and Telegram with `-IncludeFirefox` / `-IncludeTelegram`. It closes their windows first (VS Code/Cursor keep unsaved files via hot exit, Firefox saves the session), kills what is still running after 15 s and starts them all again at the end. Claude and AmneziaVPN are left running: closing them would end the Claude session / drop the VPN, and their files copy fine. The script also runs `wsl --shutdown`, so all WSL sessions close.
+
+| Parameter | Default | Purpose |
 |--|--|--|
-| `-Dest` | `D:\PCBackup` | локальная папка бэкапов |
-| `-Mirror` | из `mirror.txt` | вторая копия (NAS); `''` — не копировать |
-| `-Distro` | `AlmaLinux-10` | имя WSL-дистрибутива |
-| `-SkipWsl` | — | без экспорта WSL |
+| `-Dest` | `D:\PCBackup` | local backup folder |
+| `-Mirror` | from `mirror.txt` | second copy (NAS); `''` - no copy |
+| `-Distro` | the default WSL distro | WSL distro name |
+| `-SkipWsl` | - | no WSL export |
+| `-NoCloseApps` | - | do not close the apps (close them yourself) |
 
-Бэкап собирается локально, затем копируется на `-Mirror` через `robocopy /J /A-:R`. Скрипты кладутся рядом с папками бэкапов.
+The backup is built locally, then copied to `-Mirror` with `robocopy /J /A-:R`. The scripts are placed next to the backup folders.
 
-Чтобы не передавать `-Mirror` каждый раз, положите рядом со скриптом `mirror.txt` с одной строкой — путём к сетевой папке (в git не коммитится, см. `.gitignore`):
+To avoid passing `-Mirror` every time, put `mirror.txt` with one line - the network folder path - next to the script (not committed, see `.gitignore`):
 
 ```powershell
 Set-Content D:\PCBackup\mirror.txt '\\nas\share\Backups\PC'
 ```
 
-Если нет ни `-Mirror`, ни `mirror.txt`, бэкап остаётся только локальным.
+With neither `-Mirror` nor `mirror.txt` the backup stays local only.
 
-## Восстановление
+## Restore
 
-PowerShell **от администратора**:
+PowerShell **as administrator**:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File D:\PCBackup\Restore-PC.ps1
 ```
 
-Если скрипт попросит перезагрузку (включение WSL) — перезагрузитесь и запустите ещё раз. Повторный запуск безопасен: установленное пропускается.
+If the script asks for a reboot (enabling WSL), reboot and run it again. Running it again is safe: installed parts are skipped.
 
-| Параметр | По умолчанию | Назначение |
+| Parameter | Default | Purpose |
 |--|--|--|
-| `-From` | самый свежий `yyyy-MM-dd_HHmm` рядом со скриптом | конкретный бэкап |
-| `-Distro` | `AlmaLinux-10` | имя WSL-дистрибутива |
-| `-WslDir` | `D:\WSL\AlmaLinux-10` | куда положить `ext4.vhdx` |
-| `-SkipApps`, `-SkipWsl`, `-SkipFiles` | — | пропустить этап |
+| `-From` | newest `yyyy-MM-dd_HHmm` next to the script | specific backup |
+| `-Distro` | from `context.json` of the backup | WSL distro name |
+| `-WslDir` | `D:\WSL\<distro>` | where to put `ext4.vhdx` |
+| `-SkipApps`, `-SkipWsl`, `-SkipFiles` | - | skip a stage |
 
-По шагам:
+Step by step:
 
-1. Ставит программы через `winget` (список — в начале `Restore-PC.ps1`, правьте под себя), затем тихо ставит программы не из winget из `installers\` (таблица `$offline`: файл, ключи тихой установки, путь для проверки «уже установлено»). Новый установщик добавляется в двух местах: `$installers` в `Backup-PC.ps1` и `$offline` в `Restore-PC.ps1`.
-2. Включает WSL (`wsl --install --no-distribution`), копирует `.vhdx` в `-WslDir` и подключает его `wsl --import-in-place`. Если в `-WslDir` уже есть `ext4.vhdx` (диск пережил переустановку на `D:`), подключает его без копирования. Выставляет `DefaultUid`, иначе WSL входит под root.
-3. Копирует `files\*` обратно в профиль.
-4. Регистрирует шрифты в `HKCU\Software\Microsoft\Windows NT\CurrentVersion\Fonts`.
-5. Импортирует `reg\*.reg`.
-6. Ставит расширения Cursor/VS Code по спискам.
-7. Печатает чек-лист ручных шагов: драйверы, Office, принтер, библиотека Steam, логины.
+1. Installs programs with `winget` (the list is at the top of `Restore-PC.ps1`, adjust it), then silently installs programs not in winget from `installers\` (the `$offline` table: file, silent install switches, path for the "already installed" check). A new installer is added in two places: `$installers` in `Backup-PC.ps1` and `$offline` in `Restore-PC.ps1`.
+2. Enables WSL (`wsl --install --no-distribution`), copies the `.vhdx` to `-WslDir` and attaches it with `wsl --import-in-place`. If `-WslDir` already has `ext4.vhdx` (the disk survived the reinstall on `D:`), attaches it without copying. Sets `DefaultUid` of the WSL user from the backup, otherwise WSL logs in as root.
+3. Copies `files\*` back into the current profile; if the profile folder changed, moves user paths in the restored configs. Recreates shortcuts from `shortcuts\*.json`.
+4. Registers fonts in `HKCU\Software\Microsoft\Windows NT\CurrentVersion\Fonts`.
+5. Imports `reg\*.reg` (with user paths moved in a temp copy if the profile folder changed).
+6. Installs Cursor/VS Code extensions from the lists.
+7. Prints a checklist of manual steps: drivers, Office, printer, Steam library, sign-ins.
 
-> Не ставьте тот же дистрибутив из Microsoft Store после восстановления: он зарегистрируется под тем же именем и будет конфликтовать с импортированным.
+> Do not install the same distro from the Microsoft Store after the restore: it registers under the same name and conflicts with the imported one.
 
-## Проверка экспорта WSL
+## Checking the WSL export
 
-Не трогая основной дистрибутив:
+Without touching the main distro:
 
 ```powershell
-wsl --import Alma-RestoreTest D:\WSL-test D:\PCBackup\<дата>\wsl\AlmaLinux-10.vhdx --vhd
+wsl --import Alma-RestoreTest D:\WSL-test D:\PCBackup\<date>\wsl\AlmaLinux-10.vhdx --vhd
 wsl -d Alma-RestoreTest -u <user> --cd ~ -- ls -A ~/.ssh
 wsl --unregister Alma-RestoreTest
 ```
 
-## Известные грабли (учтены в скриптах)
+## Known pitfalls (handled in the scripts)
 
-| Симптом | Причина | Решение |
+| Symptom | Cause | Fix |
 |--|--|--|
-| `wsl --export` → `ERROR_SHARING_VIOLATION` | после `--terminate` VM ещё держит `ext4.vhdx` | `wsl --shutdown`, пауза, до 3 попыток |
-| robocopy на Samba: `FAILED` на файлах с ReadOnly | после установки ReadOnly нельзя проставить время файла | `/A-:R` |
-| `WSL ERROR: CreateProcessCommon: chdir(...) failed` | `wsl.exe` пытается зайти в текущую папку Windows | `wsl.exe --cd ~` |
-| кириллица в выводе — кракозябры | Windows PowerShell 5.1 читает `.ps1` без BOM как ANSI | файлы сохранены в UTF-8 **с BOM**, сохраняйте так же |
+| `wsl --export` -> `ERROR_SHARING_VIOLATION` | after `--terminate` the VM still holds `ext4.vhdx` | `wsl --shutdown`, pause, up to 3 attempts |
+| robocopy to Samba: `FAILED` on ReadOnly files | the file time cannot be set once ReadOnly is set | `/A-:R` |
+| `WSL ERROR: CreateProcessCommon: chdir(...) failed` | `wsl.exe` tries to enter the current Windows folder | `wsl.exe --cd ~` |
+| robocopy exit code 9 on PowerToys | `settings.json.cli-lock` is held open by PowerToys | PowerToys is closed first; `*.cli-lock` is excluded |
+| `?????` instead of text in the console | Windows PowerShell 5.1 cannot print non-ASCII text in many consoles, BOM or not | the scripts are ASCII-only, keep them so |
+| a folder created by an app in `%LOCALAPPDATA%` is "missing" for the backup | packaged (MSIX) apps such as Claude get new AppData folders redirected to `%LOCALAPPDATA%\Packages\<app>\LocalCache` | keep such files outside AppData (e.g. `%USERPROFILE%\NetMiniDisplay`) |
