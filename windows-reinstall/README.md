@@ -16,8 +16,8 @@
 | WSL | дистрибутив целиком: `wsl --export <distro> <file>.vhdx --format vhd` (ключи, zsh/oh-my-zsh/p10k, brew, `~/.kube`, репозитории — всё внутри) |
 | Списки | `winget export`, программы из реестра, appx, автозагрузка, пользовательский `PATH`, расширения Cursor/VS Code, `brew leaves` и `dnf --userinstalled` из WSL |
 | `%USERPROFILE%` | `.ssh`, `.gitconfig`, `.wslconfig`, `.claude`, `.claude.json`, `.cursor` и `.vscode` (без `extensions`), `.vscode-shared`, `.copilot` |
-| `%APPDATA%` | `Cursor\User`, `Code\User` (без `workspaceStorage`, `History`), `flameshot` |
-| `%LOCALAPPDATA%` | Windows Terminal `settings.json`, PowerToys, AmneziaVPN, пользовательские шрифты (Nerd Fonts) |
+| `%APPDATA%` | `Cursor\User`, `Code\User` (без `workspaceStorage`, `History`), `flameshot`, ярлык автозагрузки `NetMiniDisplay.lnk` |
+| `%LOCALAPPDATA%` | Windows Terminal `settings.json`, PowerToys, AmneziaVPN, пользовательские шрифты (Nerd Fonts), `NetMiniDisplay` (скрипт окна Grafana на мини-экране, без `edge-profile`) |
 | Реестр | AmneziaVPN, Flameshot, Soundpad, 7-Zip, `Explorer\Advanced`, `Keyboard Layout\Toggle` |
 | Установщики | программы, которых нет в winget (сейчас DriverIdentifier) — список `$installers` в `Backup-PC.ps1` |
 | Опционально | `-IncludeFirefox` (профиль), `-IncludeTelegram` (`tdata` без кэша), `-IncludeUserFolders` (Desktop, Documents, Downloads) |
