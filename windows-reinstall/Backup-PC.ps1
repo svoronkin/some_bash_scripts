@@ -232,7 +232,9 @@ if ($Mirror) {
     Step "Copy to $Mirror"
     if (Test-Path $Mirror) {
         $stampName = Split-Path $Root -Leaf
-        # /A-:R - drop ReadOnly: on Samba robocopy cannot set the file time after it (error 5)
+        # Unbuffered copy (/J) of a ReadOnly file to Samba fails with error 5 even with /A-:R (the fonts are
+        # ReadOnly), so clear ReadOnly in the local backup first; nothing in it needs the flag.
+        Get-ChildItem $Root -Recurse -File -Force -EA 0 | Where-Object IsReadOnly | ForEach-Object { $_.IsReadOnly = $false }
         & robocopy $Root (Join-Path $Mirror $stampName) /E /R:2 /W:5 /NFL /NDL /NJH /NP /J /A-:R | Select-Object -Last 12
         if ($LASTEXITCODE -ge 8) { Write-Warning "robocopy to the NAS: exit code $LASTEXITCODE" }
         Copy-Item (Join-Path $Dest '*.ps1') $Mirror -Force
